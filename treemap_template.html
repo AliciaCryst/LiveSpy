@@ -74,8 +74,8 @@
   </div>
   <div class="status-row">
     <span id="status">Loading holdings…</span>
-    <div class="legend"><span><i class="swatch" style="background:#ccebd8"></i>Higher</span>
-      <span><i class="swatch" style="background:#f6d5d3"></i>Lower</span>
+    <div class="legend"><span id="gainLegend"><i class="swatch" style="background:#ccebd8"></i>Gains</span>
+      <span id="lossLegend"><i class="swatch" style="background:#8b0000"></i>Losses</span>
       <span><i class="swatch" style="background:#dce4ed"></i>Flat / no quote</span></div>
   </div>
   <div class="chart-wrapper"><svg id="chart" viewBox="0 0 1250 850" role="img" aria-label="Treemap of SPY holdings, sized by weight and colored by daily price change"></svg></div>
@@ -91,10 +91,34 @@ async function init() {
   const fields = Object.fromEntries(["Ticker","Name","Weight","Rank","Price","Change","Date"]
     .map(key => [key, document.querySelector("#detail" + key)]));
   const dollars = new Intl.NumberFormat("en-US", {style:"currency",currency:"USD",minimumFractionDigits:2,maximumFractionDigits:2});
+  const changes = holdings.map(d => d.changePct).filter(Number.isFinite);
+  const losses = changes.filter(value => value < 0);
+  const gains = changes.filter(value => value > 0);
+  const mostNegative = losses.length ? d3.min(losses) : null;
+  const leastNegative = losses.length ? d3.max(losses) : null;
+  const minGain = gains.length ? d3.min(gains) : null;
+  const maxGain = gains.length ? d3.max(gains) : null;
   let lockedTicker = null;
 
   function price(d) { return d.price == null ? "N/A" : dollars.format(d.price); }
-  function color(d) { return d.changePct == null || d.changePct === 0 ? "#dce4ed" : d.changePct > 0 ? "#ccebd8" : "#f6d5d3"; }
+  function percent(d) {
+    return d.changePct == null ? "N/A" : `${d.changePct > 0 ? "+" : ""}${d.changePct.toFixed(2)}%`;
+  }
+  function scale(value, start, end) {
+    return start === end ? 1 : Math.max(0, Math.min(1, (value - start) / (end - start)));
+  }
+  function color(d) {
+    if (d.changePct == null || d.changePct === 0) return "#dce4ed";
+    if (d.changePct < 0) {
+      return d3.interpolateRgb("#8b0000", "#f6d5d3")(scale(d.changePct, mostNegative, leastNegative));
+    }
+    return d3.interpolateRgb("#006400", "#ccebd8")(scale(d.changePct, minGain, maxGain));
+  }
+  function textColor(d) {
+    const rgb = d3.rgb(color(d));
+    const luminance = (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255;
+    return luminance < 0.48 ? "#ffffff" : "#18232e";
+  }
   function showDetail(d) {
     if (!d) return;
     fields.Ticker.textContent = d.ticker; fields.Name.textContent = d.name;
@@ -133,20 +157,20 @@ async function init() {
     groups.each(function(d) {
       const w = d.x1-d.x0, h = d.y1-d.y0;
       const group = d3.select(this).append("g").attr("clip-path",`url(#clip-${d.data.rank})`);
-      const label = d.data.ticker, quote = price(d.data);
-      // For narrow tiles, retain the complete label in the hover tooltip and detail card.
-      if (w < 8 || h < 5) return;
-      const twoLines = h >= 13;
-      const font = Math.max(3,Math.min(22,Math.sqrt(w*h)/7,(w-4)/(label.length*0.65)));
-      const quoteFont = Math.max(2.8,Math.min(font*0.78,(w-4)/(quote.length*0.62)));
-      group.append("text").attr("x",w>34 ? 5 : w/2).attr("y",twoLines ? Math.min(h-4,font+4) : h/2)
-        .attr("dy",twoLines ? null : "0.35em").attr("text-anchor",w>34 ? "start" : "middle")
-        .attr("fill","#18232e").attr("font-weight",800).attr("font-size",font)
-        .attr("pointer-events","none").text(twoLines ? label : `${label} ${quote}`);
-      if (twoLines) group.append("text").attr("x",w>34 ? 5 : w/2)
-        .attr("y",Math.min(h-2,font+quoteFont+6)).attr("text-anchor",w>34 ? "start" : "middle")
-        .attr("fill","#263a44").attr("font-weight",600).attr("font-size",quoteFont)
-        .attr("pointer-events","none").text(quote);
+      const lines = [d.data.ticker, price(d.data), percent(d.data)];
+      const longest = Math.max(...lines.map(value => value.length));
+      const font = Math.max(2.5, Math.min(20, h / 3.8, (w - 4) / (longest * 0.62)));
+      const lineHeight = font * 1.12;
+      const firstY = Math.max(font, (h - lineHeight * 3) / 2 + font);
+      group.selectAll("text").data(lines).join("text")
+        .attr("x", w > 34 ? 5 : w / 2)
+        .attr("y", (_, index) => firstY + index * lineHeight)
+        .attr("text-anchor", w > 34 ? "start" : "middle")
+        .attr("fill", textColor(d.data))
+        .attr("font-weight", (_, index) => index === 0 ? 800 : 600)
+        .attr("font-size", font)
+        .attr("pointer-events", "none")
+        .text(value => value);
     });
 
     function restore() {
@@ -185,6 +209,12 @@ async function init() {
   const quoteNote = meta.missingQuotes === holdings.length
     ? "Prices are unavailable in this starter chart. Run the workflow to fetch them."
     : "Prices are the latest available Yahoo Finance regular-hours bar (one-minute when available); changes compare with the prior trading session's final bar.";
+  document.querySelector("#lossLegend").lastChild.textContent = losses.length
+    ? ` Losses ${mostNegative.toFixed(2)}% to ${leastNegative.toFixed(2)}%`
+    : " Losses unavailable";
+  document.querySelector("#gainLegend").lastChild.textContent = gains.length
+    ? ` Gains +${minGain.toFixed(2)}% to +${maxGain.toFixed(2)}%`
+    : " Gains unavailable";
   document.querySelector("#footer").textContent =
     `State Street holdings as of ${meta.holdingsAsOf}. Chart generated ${meta.generatedAt}. ${quoteNote} Small cells show their complete details on hover or selection. D3 loads from jsDelivr.`;
   showDetail(holdings[0]); render();
