@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SPY Interactive Holdings Map</title>
+<style>
+  :root { color-scheme:dark; --bg:#0d1117; --panel:#151b23; --card:#1c2430;
+    --text:#f4f7fb; --muted:#aab5c1; --border:#344154; --accent:#7db9ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+  .container { width:min(1550px,96%); margin:28px auto; }
+  .header { display:flex; justify-content:space-between; align-items:end; gap:18px; flex-wrap:wrap; }
+  h1 { margin:0; font-size:28px; }
+  .subtitle { margin-top:7px; color:var(--muted); }
+  .controls { display:flex; gap:8px; flex-wrap:wrap; }
+  input,button { min-height:44px; border:1px solid var(--border); border-radius:9px;
+    background:var(--card); color:var(--text); font-size:16px; }
+  input { padding:0 14px; width:270px; }
+  button { padding:0 16px; cursor:pointer; }
+  button:hover,button:focus-visible,input:focus-visible { border-color:var(--accent); }
+  .detail-card { margin-top:18px; background:var(--card); border:1px solid var(--border);
+    border-radius:12px; padding:18px; }
+  .detail-top { display:flex; justify-content:space-between; gap:20px; flex-wrap:wrap; }
+  .detail-ticker,.detail-weight { font-size:34px; font-weight:800; }
+  .detail-name { margin-top:4px; color:var(--muted); }
+  .detail-weight { text-align:right; }
+  .detail-label { color:var(--muted); font-size:12px; }
+  .details { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); margin-top:16px; gap:16px; }
+  .detail-value { margin-top:3px; font-weight:700; overflow-wrap:anywhere; }
+  .up { color:#a9e8c4; } .down { color:#ffc1bd; }
+  .legend { display:flex; align-items:center; flex-wrap:wrap; gap:14px; color:var(--muted); font-size:13px; }
+  .swatch { display:inline-block; width:12px; height:12px; border-radius:3px; margin-right:5px; vertical-align:-1px; }
+  .status-row { display:flex; justify-content:space-between; align-items:center; gap:10px;
+    color:var(--muted); font-size:13px; margin:14px 0 8px; flex-wrap:wrap; }
+  .chart-wrapper { width:100%; overflow-x:auto; border:1px solid var(--border);
+    border-radius:12px; background:var(--panel); }
+  svg { display:block; width:100%; min-width:950px; height:auto; }
+  .footer { color:var(--muted); margin-top:10px; font-size:13px; line-height:1.5; }
+  .holding { cursor:pointer; outline:none; }
+  .holding rect { transition:stroke-width 120ms ease,fill-opacity 120ms ease; }
+  .holding:focus-visible rect { stroke:var(--accent); stroke-width:3; }
+  @media (max-width:680px) {
+    .detail-top { flex-direction:column; } .detail-weight { text-align:left; }
+    .details { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .controls,input { width:100%; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div>
+      <h1>SPY Interactive Holdings Map</h1>
+      <div class="subtitle">Tile area represents the published portfolio weight. Hover to enlarge; click to lock.</div>
+    </div>
+    <div class="controls">
+      <input id="search" type="search" placeholder="Search ticker or company" aria-label="Search holdings">
+      <button id="reset" type="button">Reset</button>
+    </div>
+  </div>
+  <div class="detail-card" aria-live="polite">
+    <div class="detail-top">
+      <div><div id="detailTicker" class="detail-ticker"></div><div id="detailName" class="detail-name"></div></div>
+      <div><div id="detailWeight" class="detail-weight"></div><div class="detail-label">Portfolio weight</div></div>
+    </div>
+    <div class="details">
+      <div><div class="detail-label">Rank</div><div id="detailRank" class="detail-value"></div></div>
+      <div><div class="detail-label">Latest price</div><div id="detailPrice" class="detail-value"></div></div>
+      <div><div class="detail-label">Change vs previous trading close</div><div id="detailChange" class="detail-value"></div></div>
+      <div><div class="detail-label">Latest price bar (Pacific time)</div><div id="detailDate" class="detail-value"></div></div>
+    </div>
+  </div>
+  <div class="status-row">
+    <span id="status">Loading holdings…</span>
+    <div class="legend"><span><i class="swatch" style="background:#ccebd8"></i>Higher</span>
+      <span><i class="swatch" style="background:#f6d5d3"></i>Lower</span>
+      <span><i class="swatch" style="background:#dce4ed"></i>Flat / no quote</span></div>
+  </div>
+  <div class="chart-wrapper"><svg id="chart" viewBox="0 0 1250 850" role="img" aria-label="Treemap of SPY holdings, sized by weight and colored by daily price change"></svg></div>
+  <div id="footer" class="footer"></div>
+</div>
+<script type="module">
+async function init() {
+  const holdings = __HOLDINGS_JSON__;
+  const meta = __METADATA_JSON__;
+  const d3 = await import("https://cdn.jsdelivr.net/npm/d3@7.9.0/+esm");
+  const chart = d3.select("#chart"), width = 1250, height = 850;
+  const search = document.querySelector("#search"), status = document.querySelector("#status");
+  const fields = Object.fromEntries(["Ticker","Name","Weight","Rank","Price","Change","Date"]
+    .map(key => [key, document.querySelector("#detail" + key)]));
+  const dollars = new Intl.NumberFormat("en-US", {style:"currency",currency:"USD",minimumFractionDigits:2,maximumFractionDigits:2});
+  let lockedTicker = null;
+
+  function price(d) { return d.price == null ? "N/A" : dollars.format(d.price); }
+  function color(d) { return d.changePct == null || d.changePct === 0 ? "#dce4ed" : d.changePct > 0 ? "#ccebd8" : "#f6d5d3"; }
+  function showDetail(d) {
+    if (!d) return;
+    fields.Ticker.textContent = d.ticker; fields.Name.textContent = d.name;
+    fields.Weight.textContent = d.weight.toFixed(4) + "%";
+    fields.Rank.textContent = "#" + d.rank;
+    fields.Price.textContent = price(d);
+    fields.Change.textContent = d.changePct == null ? "N/A" :
+      `${d.change > 0 ? "+" : ""}${dollars.format(d.change)} (${d.changePct > 0 ? "+" : ""}${d.changePct.toFixed(2)}%)`;
+    fields.Change.className = "detail-value " + (d.changePct > 0 ? "up" : d.changePct < 0 ? "down" : "");
+    fields.Date.textContent = d.priceDate || "N/A";
+  }
+
+  function render(filter = "") {
+    chart.selectAll("*").remove();
+    const query = filter.trim().toLowerCase();
+    const data = query ? holdings.filter(d => d.ticker.toLowerCase().includes(query) || d.name.toLowerCase().includes(query)) : holdings;
+    status.textContent = `Showing ${data.length} of ${holdings.length} holdings | source weights total ${meta.totalWeight.toFixed(4)}%` +
+      (meta.missingQuotes ? ` | ${meta.missingQuotes} missing quote${meta.missingQuotes === 1 ? "" : "s"}` : "");
+    if (!data.length) {
+      chart.append("text").attr("x",width/2).attr("y",height/2).attr("text-anchor","middle")
+        .attr("fill","#aab5c1").attr("font-size",22).text("No matching holdings");
+      return;
+    }
+    const root = d3.hierarchy({children:data}).sum(d => d.weight || 0).sort((a,b) => b.value-a.value);
+    d3.treemap().size([width,height]).paddingInner(2).paddingOuter(4)(root);
+    const groups = chart.selectAll("g.holding").data(root.leaves()).join("g")
+      .attr("class","holding").attr("tabindex",0).attr("role","button")
+      .attr("aria-label",d => `${d.data.ticker}, ${d.data.name}, ${d.data.weight.toFixed(4)} percent, ${price(d.data)}, daily change ${d.data.changePct == null ? "unavailable" : d.data.changePct.toFixed(2) + " percent"}`)
+      .attr("transform",d => `translate(${d.x0},${d.y0})`);
+    groups.append("rect").attr("width",d => Math.max(1,d.x1-d.x0)).attr("height",d => Math.max(1,d.y1-d.y0))
+      .attr("rx",3).attr("fill",d => color(d.data)).attr("stroke","#0d1117").attr("stroke-width",0.8);
+    groups.append("title").text(d => `${d.data.ticker} · ${d.data.name}\n${price(d.data)} · ${d.data.changePct == null ? "N/A" : (d.data.changePct > 0 ? "+" : "") + d.data.changePct.toFixed(2) + "%"}\nWeight: ${d.data.weight.toFixed(4)}%`);
+    groups.append("clipPath").attr("id",d => `clip-${d.data.rank}`)
+      .append("rect").attr("width",d => Math.max(1,d.x1-d.x0)).attr("height",d => Math.max(1,d.y1-d.y0));
+
+    groups.each(function(d) {
+      const w = d.x1-d.x0, h = d.y1-d.y0;
+      const group = d3.select(this).append("g").attr("clip-path",`url(#clip-${d.data.rank})`);
+      const label = d.data.ticker, quote = price(d.data);
+      // For narrow tiles, retain the complete label in the hover tooltip and detail card.
+      if (w < 8 || h < 5) return;
+      const twoLines = h >= 13;
+      const font = Math.max(3,Math.min(22,Math.sqrt(w*h)/7,(w-4)/(label.length*0.65)));
+      const quoteFont = Math.max(2.8,Math.min(font*0.78,(w-4)/(quote.length*0.62)));
+      group.append("text").attr("x",w>34 ? 5 : w/2).attr("y",twoLines ? Math.min(h-4,font+4) : h/2)
+        .attr("dy",twoLines ? null : "0.35em").attr("text-anchor",w>34 ? "start" : "middle")
+        .attr("fill","#18232e").attr("font-weight",800).attr("font-size",font)
+        .attr("pointer-events","none").text(twoLines ? label : `${label} ${quote}`);
+      if (twoLines) group.append("text").attr("x",w>34 ? 5 : w/2)
+        .attr("y",Math.min(h-2,font+quoteFont+6)).attr("text-anchor",w>34 ? "start" : "middle")
+        .attr("fill","#263a44").attr("font-weight",600).attr("font-size",quoteFont)
+        .attr("pointer-events","none").text(quote);
+    });
+
+    function restore() {
+      groups.attr("transform",d => `translate(${d.x0},${d.y0})`).style("filter",null).style("opacity",1);
+      groups.select("rect").attr("stroke","#0d1117").attr("stroke-width",0.8);
+    }
+    function activate(node,d,persist) {
+      if (persist) lockedTicker = d.data.ticker;
+      showDetail(d.data); restore();
+      groups.style("opacity",other => other === d ? 1 : 0.36);
+      const w = Math.max(1,d.x1-d.x0), h = Math.max(1,d.y1-d.y0);
+      const scale = Math.min(2.6,Math.max(1.08,140/Math.max(28,Math.min(w,h))));
+      const x = Math.max(4,Math.min(width-w*scale-4,d.x0+(w-w*scale)/2));
+      const y = Math.max(4,Math.min(height-h*scale-4,d.y0+(h-h*scale)/2));
+      d3.select(node).raise().attr("transform",`translate(${x},${y}) scale(${scale})`)
+        .style("filter","drop-shadow(0 8px 16px rgba(0,0,0,.5))")
+        .select("rect").attr("stroke","#3276c0").attr("stroke-width",3);
+    }
+    groups.on("mouseenter",function(e,d){ if (!lockedTicker) activate(this,d,false); })
+      .on("mouseleave",function(){ if (!lockedTicker) restore(); })
+      .on("focus",function(e,d){ if (!lockedTicker) activate(this,d,false); })
+      .on("blur",function(){ if (!lockedTicker) restore(); })
+      .on("click",function(e,d){ e.stopPropagation(); lockedTicker === d.data.ticker ? (lockedTicker=null,restore()) : activate(this,d,true); })
+      .on("keydown",function(e,d){ if (e.key === "Enter" || e.key === " ") { e.preventDefault(); this.dispatchEvent(new MouseEvent("click",{bubbles:true})); } });
+    chart.on("click",() => { lockedTicker=null; restore(); showDetail(holdings[0]); });
+  }
+  search.addEventListener("input",() => {
+    lockedTicker=null; render(search.value);
+    const query = search.value.trim().toLowerCase();
+    showDetail(holdings.find(d => d.ticker.toLowerCase().includes(query) || d.name.toLowerCase().includes(query)) || holdings[0]);
+  });
+  document.querySelector("#reset").addEventListener("click",() => {
+    search.value=""; lockedTicker=null; render(); showDetail(holdings[0]); search.focus();
+  });
+  document.addEventListener("keydown",e => { if (e.key === "Escape") { lockedTicker=null; render(search.value); showDetail(holdings[0]); } });
+  const quoteNote = meta.missingQuotes === holdings.length
+    ? "Prices are unavailable in this starter chart. Run the workflow to fetch them."
+    : "Prices are the latest available Yahoo Finance regular-hours bar (one-minute when available); changes compare with the prior trading session's final bar.";
+  document.querySelector("#footer").textContent =
+    `State Street holdings as of ${meta.holdingsAsOf}. Chart generated ${meta.generatedAt}. ${quoteNote} Small cells show their complete details on hover or selection. D3 loads from jsDelivr.`;
+  showDetail(holdings[0]); render();
+}
+init().catch(error => {
+  console.error(error);
+  document.querySelector("#status").textContent = "Chart could not load. Check your connection to jsDelivr for D3.js.";
+});
+</script>
+</body>
+</html>
